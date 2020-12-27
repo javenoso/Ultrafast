@@ -10,8 +10,6 @@ The image profile program is still in the works and works best in a text editor,
 
 The global fitting program can theoretically fit as many transients as the user wishes, but currently up to 5 is supported. New models are also easy to impliment.
 The object-oriented nature of this program makes fitting multiple data sets, or the same dataset with various models, very easy.
-As far as I am concerned, this is the first TAS fitting program based on Python that uses the basic science Python libraries.
-Other software exists that have more features or a nice interface (Glotaran, for example), but this program is more Pythonic than others that I have found.
 
 The pDFWM program can simply be used for simple FFT's and for fitting Gaussians. Currently fitting 7 peaks is supported, but it is easy to add more peaks or to add different functions, such as Lorenzians.
 For pDFWM, data is collected in the lab such that three sets of data are saved for each pump delay time step: pump on, pump off, and the subtracted signals. If your lab is like ours, this means you have many files to sort though.
