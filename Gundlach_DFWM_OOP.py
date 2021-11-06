@@ -1,1060 +1,613 @@
-'''
-Main DFWM FFT file
-'''
-import os
-import re
+"""
+Last updated: Nov. 6th, 2021
+
+Origin-like image profile
+
+Image_Profile function can be used as is for Sublime Text or other text editors.
+
+For Spyder, use the code outside of the Image_Profile function so the graphs properly update.
+"""
+
 import pandas as pd
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
-from scipy.interpolate import interp1d
-from scipy import sparse
-from scipy.sparse.linalg import spsolve
-from scipy.optimize import curve_fit
-from collections import OrderedDict
+from matplotlib.widgets import Slider
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib import cm
+import seaborn as sns
 
+
+    
 def find_nearest(array, value):
     array = np.asarray(array)
     idx = (np.abs(array - value)).argmin()
     return idx, array[idx]
 
-def copy(result):
-    # transposes row arrays to columns and copies to clipboard
-    result = pd.DataFrame(result.T)
-    result.to_clipboard(index = False, header = False)
+def SVD(file, n, tstart = None, tstop = None, wstart = None, wstop = None):
+    # n is the number of singular values that you want to plot
+    """
+    Source:
+        https://cmdlinetips.com/2019/05/singular-value-decomposition-svd-in-python/
+    """
+
+    data = np.array(pd.read_csv(file, header = None, delim_whitespace = False))
+    t = data[1:, 0]
+    w = data[0, 1:]
+    a = data[1:, 1:] # convert to mOD
+
+    if tstart == None:
+        tstart = t[0]
+    else:
+        pass
+
+    if tstop == None:
+        tstop = t[-1]
+    else:
+        pass
+
+    if wstart == None:
+        wstart = w[0]
+    else:
+        pass
+
+    if wstop == None:
+        wstop = w[-1]
+    else:
+        pass
+
+    tstart, tstop, wstart, wstop = [tstart, tstop, wstart, wstop]
+
+    tstart_idx = find_nearest(t, tstart)[0]
+    tstop_idx = find_nearest(t, tstop)[0]
+    wstart_idx = find_nearest(w, wstart)[0]
+    wstop_idx = find_nearest(w, wstop)[0]
+
+    t = t[tstart_idx:tstop_idx]
+    w = w[wstart_idx:wstop_idx]
+    # convert to mOD
+    a = 1000 * a[tstart_idx:tstop_idx, wstart_idx:wstop_idx]
+
+    """
+    u = left-singular vectors, (m, m) = (184, 184) --> times
+    s = singular values, (m,) = (184,)
+    v = right-singular vector, (n, n) = (1024, 1024) --> wavelengths
+    """
+
+    u, s, v = np.linalg.svd(a, full_matrices = True)
+
+    var_explained = np.round(s**2 / np.sum(s**2), decimals = 3)
+
+    plt.figure()
+    sns.barplot(x = list(range(1, len(var_explained)+1)), y = var_explained)
+    plt.xlim(0, n+1) # plot a little further than n
+    plt.xlabel('SVs', fontsize = 16)
+    plt.ylabel('Percent Variance Explained', fontsize = 16)
+
+    plt.figure()
+    for i in range(n):
+        plt.subplot(2, 1, 1)
+        plt.plot(t, u[:, i], label = i+1)
+        print(i+1)
+        plt.title('Left Singular Vectors')
+        plt.xlabel('Delay Time (fs)')
+    plt.legend()
+    for i in range(n):
+        plt.subplot(2, 1, 2)
+        plt.plot(w, v[i, :], label = i+1)
+        plt.title('Right Singular Vectors')
+        plt.xlabel('Wavelength (nm)')
+    plt.legend()
+    plt.show()
+
+    return u, s, v
+
+
+def Time_Zero(file, tstart, tstop, wstart, wstop):
+    data = np.array(pd.read_csv(file, header = None, delim_whitespace = False))
+    time = data[1:, 0]
+    wavelength = data[0, 1:]
+    amplitude = data[1:, 1:]
+
+    t = time
+    w = wavelength
+    a = amplitude
+
+    if tstart == None:
+        tstart = t[0]
+    else:
+        pass
+
+    if tstop == None:
+        tstop = t[-1]
+    else:
+        pass
+
+    if wstart == None:
+        wstart = w[0]
+    else:
+        pass
+
+    if wstop == None:
+        wstop = w[-1]
+    else:
+        pass
+
+    tstart, tstop, wstart, wstop = [tstart, tstop, wstart, wstop]
+
+    tstart_idx = find_nearest(t, tstart)[0]
+    tstop_idx = find_nearest(t, tstop)[0]
+    wstart_idx = find_nearest(w, wstart)[0]
+    wstop_idx = find_nearest(w, wstop)[0]
+
+    t = t[tstart_idx:tstop_idx]
+    w = w[wstart_idx:wstop_idx]
+    # convert to mOD
+    a = 1000 * a[tstart_idx:tstop_idx, wstart_idx:wstop_idx]
+
+    t_shift = []
+    a_shift = []
+    for i in range(len(w)):
+        print(w[i], 'nm')
+        print('a', np.size(a[:, i]))
+        print('b', np.size(abs(a[:, i])))
+        a_max = np.max(abs(a[:, i])) # max point of the absorption vector, abs() in case of bleach
+        a_TZ = 0.6 * a_max # time-zero guess of 60% of the rise, positive number because of abs()
+        t_ind, a_TZ = find_nearest(abs(a[:, i]), a_TZ) # both values are positive
+        t_TZ = t[t_ind] # a[t_idx, wl] can be negative if spectrum is of a bleach signal
+        t = t - t_TZ # shift time to make time-zero occur at t = 0
+        a = a[:-t_ind, i] # truncate absoprtion vector to be same length as corresponding time vector
+        t_shift.append(t)
+        a_shift.append(a)
+        # if i == 0:
+        #     t_shift = t
+        #     a_shift = a
+        # else:
+        #     t_shift = np.column_stack((t_shift, t)) # collect all of the shifted time vectors
+        #     a_shift = np.column_stack((a_shift, a)) # collect all of the truncated absorption vectors
+
+        print('a', np.size(a[:, i]))
+        print('b', np.size(abs(a[:, i])))
+
+    # truncate all of the time and absorption vecotrs to have the size of the smallest vector
+    column_len_list = []
+    for i in t_shift:
+        column_len_list.append(len(i))
+    min_len = min(column_len_list)
+
+    # for i in range(len(t_shift[0, :])):
+    #     column_len_list.append(len(t_shift[:, i]))
+    # min_idx, min_len = find_nearest(column_len_list, min(column_len_list))
+
+    stop_idx = min_len - 1
+
+    # t_truncated = np.array([])
+    # a_truncated = np.array([])
+    # for i in range(len(t_shift[0, :])):
+    #     column = t_shift[:, i]
+    #     column = column[:stop_idx]
+    #     if i == 0:
+    #         t_truncated = column
+    #     else:
+    #         t_truncated = np.column_stack((t_truncated, column))
+    # for i in range(len(a_shift[0, :])):
+    #     column = a_shift[:, i]
+    #     column = column[:stop_idx]
+    #     if i == 0:
+    #         a_truncated = column
+    #     else:
+    #         a_truncated = np.column_stack((a_truncated, column))
+
+
+    t_truncated = []
+    a_truncated = []
+
+    for i in range(len(t_shift)):
+        t_shift[i] = t_shift[i][:stop_idx]
+        a_shift[i] = a_shift[i][:stop_idx]
+        t_truncated.append(t_shift[i])
+        a_truncated.append(a_shift[i])
+
+    # return vectors to be used for Image_Profile_TZ
+    return t_truncated, w, a_truncated
+
+class Cursor(object):
+    """
+    Source:
+        https://matplotlib.org/3.1.1/gallery/misc/cursor_demo_sgskip.html
+    """
+    def __init__(self, file, ax, t, w, a):
+        self.file = file
+        self.ax = ax
+        self.t = t
+        self.w = w
+        self.a = a
+        self.lx = ax.axhline(color='k')  # the horiz line
+        self.ly = ax.axvline(color='k')  # the vert line
+
+        # text location in axes coords
+        self.txt = ax.text(0.7, 0.9, '', transform=ax.transAxes)
+
+    def mouse_move(self, event):
+        if not event.inaxes:
+            return
+
+        x, y = event.xdata, event.ydata
+        # update the line positions
+        self.lx.set_ydata(y)
+        self.ly.set_xdata(x)
+
+        self.txt.set_text('x=%1.2f, y=%1.2f' % (self.t[int(x)], y))
+        self.ax.figure.canvas.draw()   
+
+    def mouse_click(self, event):
+        if not event.inaxes:
+            return
+
+        x, y = event.xdata, event.ydata
+        # update the line positions
+        self.lx.set_ydata(y)
+        self.ly.set_xdata(x)
+
+        self.txt.set_text('x=%1.2f, y=%1.2f' % (self.t[int(x)], y))
+        self.ax.figure.canvas.draw()
+
+        t_idx = find_nearest(self.t, self.t[int(x)])[0]
+        w_idx = find_nearest(self.w, y)[0]
+
+        plt.figure(2)
+        # plt.subplot(321)
+        plt.subplot(211)
+        # convert to mOD
+        plt.plot(self.t, 1000 * self.a[:, w_idx], label = '%.f nm' % self.w[w_idx])
+        plt.xlabel('Pump Delay (fs)')
+        plt.ylabel('ΔA (mOD)')
+        plt.title('Trace')
+        plt.legend()
+
+        # plt.subplot(322)
+        plt.subplot(212)
+        # convert to mOD
+        plt.plot(self.w, 1000 * self.a[t_idx, :], label = '%.f fs' % self.t[t_idx])
+        plt.xlabel('Wavelength (nm)')
+        plt.ylabel('ΔA (mOD)')
+        plt.title('Spectrum')
+        plt.legend()
+        
+        plt.draw()
+
+        # plt.figure(5)
+        # plt.plot(self.t, 1000 * self.a[:, w_idx], label = '%s, %.f nm' % tuple((self.file, self.w[w_idx])))
+        # plt.legend()
+        # plt.figure(6)
+        # plt.plot(self.w, 1000 * self.a[t_idx, :], label = '%s, %.f fs' % tuple((self.file, self.t[t_idx])))
+        # plt.legend()
+
+        return self.t, 1000 * self.a[:, w_idx], self.w, 1000 * self.a[t_idx, :]
+
+def surf(file, tstart = None, tstop = None, wstart = None, wstop = None):
+    data = np.array(pd.read_csv(file, header = None, delim_whitespace = False))
+    time = data[1:, 0]
+    wavelength = data[0, 1:]
+    amplitude = data[1:, 1:]
+
+    t = time
+    w = wavelength
+    a = amplitude
+
+    if tstart == None:
+        tstart = t[0]
+    else:
+        pass
+
+    if tstop == None:
+        tstop = t[-1]
+    else:
+        pass
+
+    if wstart == None:
+        wstart = w[0]
+    else:
+        pass
+
+    if wstop == None:
+        wstop = w[-1]
+    else:
+        pass
+
+    tstart, tstop, wstart, wstop = [tstart, tstop, wstart, wstop]
+
+    tstart_idx = find_nearest(t, tstart)[0]
+    tstop_idx = find_nearest(t, tstop)[0]
+    wstart_idx = find_nearest(w, wstart)[0]
+    wstop_idx = find_nearest(w, wstop)[0]
+
+    t = t[tstart_idx:tstop_idx]
+    w = w[wstart_idx:wstop_idx]
+    # convert to mOD
+    a = 1000 * a[tstart_idx:tstop_idx, wstart_idx:wstop_idx]
+
+    fig = plt.figure()
+    ax = fig.gca(projection = '3d')
+    T, W = np.meshgrid(t, w)
+    ax.plot_surface(T, W, a.T, cmap = cm.rainbow)
+    ax.set_xlabel('Pump Delay (fs)')
+    ax.set_ylabel('Wavelength (nm)')
+    ax.set_zlabel('Absorbance (mOD)')
+    plt.show()
+
     return
 
-def exp1(t, y0, A1, t1):
-    return y0 + A1*np.exp(-t/t1)
+def surf_compare(filelist, tstart = None, tstop = None, wstart = None, wstop = None):
+    a_list = []
+    for file in filelist:
+        data = np.array(pd.read_csv(file, header = None, delim_whitespace = False))
+        time = data[1:, 0]
+        wavelength = data[0, 1:]
+        amplitude = data[1:, 1:]
 
-def exp2(t, y0, A1, A2, t1, t2):
-    return y0 + A1*np.exp(-t/t1) + A2*np.exp(-t/t2) 
+        t = time
+        w = wavelength
+        a = amplitude
 
-def exp3(t, y0, A1, A2, A3, t1, t2, t3):
-    return y0 + A1*np.exp(-t/t1) + A2*np.exp(-t/t2) + A3*np.exp(-t/t3)
-
-def takeFirst(elem):
-    # Source: https://www.programiz.com/python-programming/methods/built-in/sorted
-    return elem[0]
-
-def list_duplicates_of(seq,item):
-    # Source: https://stackoverflow.com/questions/5419204/index-of-duplicates-items-in-a-python-list
-    start_at = -1
-    locs = []
-    while True:
-        try:
-            loc = seq.index(item,start_at+1)
-        except ValueError:
-            break
+        if tstart == None:
+            tstart = t[0]
         else:
-            locs.append(loc)
-            start_at = loc
-    return locs
+            pass
 
-def sort_lists(x, y):
-    '''
-    Sort x and y together based on increasing values of x
-    Source:
-        https://stackoverflow.com/questions/37111798/how-to-sort-a-list-of-x-y-coordinates
-    '''
-#    print('x, y', np.shape(x), np.shape(y))
-    z = np.column_stack((x, y))
-    z = sorted(z, key=lambda k: [k[0], k[1]])
-    print(z)
-    x2, y2 = zip(*z)
-    x2 = list(x2)
-    y2 = list(y2)
-    print(len(x2), len(y2))
-#    y2 = y2[::-1]
-    print('x2, y2', np.shape(x2), np.shape(y2))
-    return x2, y2
+        if tstop == None:
+            tstop = t[-1]
+        else:
+            pass
+
+        if wstart == None:
+            wstart = w[0]
+        else:
+            pass
+
+        if wstop == None:
+            wstop = w[-1]
+        else:
+            pass
+
+        tstart, tstop, wstart, wstop = [tstart, tstop, wstart, wstop]
+
+        tstart_idx = find_nearest(t, tstart)[0]
+        tstop_idx = find_nearest(t, tstop)[0]
+        wstart_idx = find_nearest(w, wstart)[0]
+        wstop_idx = find_nearest(w, wstop)[0]
+
+        t = t[tstart_idx:tstop_idx]
+        w = w[wstart_idx:wstop_idx]
+        # convert to mOD
+        a = 1000 * a[tstart_idx:tstop_idx, wstart_idx:wstop_idx]
+        a_list.append(a)
+
+    fig = plt.figure()
+    ax = fig.gca(projection = '3d')
+    T, W = np.meshgrid(t, w)
+    for a in a_list:
+        ax.plot_surface(T, W, a.T, cmap = cm.rainbow)
+    plt.show()
+
+    return
+
+
+def Image_Profile(file, tstart = None, tstop = None, wstart = None, wstop = None):
+
+    data = np.array(pd.read_csv(file, header = None, delim_whitespace = False))
+    time = data[1:, 0]
+    wavelength = data[0, 1:]
+    amplitude = data[1:, 1:]
+
+    t = time
+    w = wavelength
+    a = amplitude
+
+    if tstart == None:
+        tstart = t[0]
+    else:
+        pass
+
+    if tstop == None:
+        tstop = t[-1]
+    else:
+        pass
+
+    if wstart == None:
+        wstart = w[0]
+    else:
+        pass
+
+    if wstop == None:
+        wstop = w[-1]
+    else:
+        pass
+
+    tstart, tstop, wstart, wstop = [tstart, tstop, wstart, wstop]
+
+    tstart_idx = find_nearest(t, tstart)[0]
+    tstop_idx = find_nearest(t, tstop)[0]
+    wstart_idx = find_nearest(w, wstart)[0]
+    wstop_idx = find_nearest(w, wstop)[0]
+
+    t = t[tstart_idx:tstop_idx+1]
+    w = w[wstart_idx:wstop_idx+1]
+    a = a[tstart_idx:tstop_idx+1, wstart_idx:wstop_idx+1]
+    a_map = 1000 * a.T[::-1] # convert to mOD and flip/rotate map to match axes
+
+
+    sns.set()
+    sns.set_context('paper')
+    fig, ax= plt.subplots()
+    cursor = Cursor(file, ax, t, w, a)
+    fig.canvas.mpl_connect('motion_notify_event', cursor.mouse_move)
+    fig.canvas.mpl_connect('button_press_event', cursor.mouse_click)
+
+    fig.subplots_adjust(left = 0.25, bottom = -0.5)
+    t_placement = np.linspace(0, len(t), len(t))
+    plt.imshow(a_map, cmap=plt.get_cmap('rainbow'), extent = [0, len(t), w[0], w[-1]], aspect = 'auto')
+    t_ticks_labels = []
+    t_ticks = np.linspace(0, len(t), 10)
+    print(t_ticks)
+    for i in t_ticks:
+        i = int(i)
+        if i == len(t):
+            t_ticks_labels.append(int(t[i-1]))
+        else:
+            t_ticks_labels.append(int(t[i]))
+    plt.xticks(ticks = t_ticks, labels = t_ticks_labels)
+    plt.xlabel('Pump Delay (fs)')
+    plt.ylabel('Wavelength (nm)')
+    plt.title('ΔA (mOD)')
+    plt.colorbar()
+    plt.show()
+    return
+
+def Image_Profile_TZ(time, wavelength, amplitude, tstart = None, tstop = None, wstart = None, wstop = None):
+    # use with Time_Zero()
+
+    t = time
+    w = wavelength
+    a = amplitude
+
+    if tstart == None:
+        tstart = t[0]
+    else:
+        pass
+
+    if tstop == None:
+        tstop = t[-1]
+    else:
+        pass
+
+    if wstart == None:
+        wstart = w[0]
+    else:
+        pass
+
+    if wstop == None:
+        wstop = w[-1]
+    else:
+        pass
+
+    tstart, tstop, wstart, wstop = [tstart, tstop, wstart, wstop]
+
+    tstart_idx = find_nearest(t, tstart)[0]
+    tstop_idx = find_nearest(t, tstop)[0]
+    wstart_idx = find_nearest(w, wstart)[0]
+    wstop_idx = find_nearest(w, wstop)[0]
+
+    t = t[tstart_idx:tstop_idx+1]
+    w = w[wstart_idx:wstop_idx+1]
+    a = a[tstart_idx:tstop_idx+1, wstart_idx:wstop_idx+1]
+    a_map = 1000 * a.T[::-1] # convert to mOD and flip/rotate map to match axes
+
+
+    sns.set()
+    sns.set_context('paper')
+    fig, ax= plt.subplots()
+    cursor = Cursor(file, ax, t, w, a)
+    fig.canvas.mpl_connect('motion_notify_event', cursor.mouse_move)
+    fig.canvas.mpl_connect('button_press_event', cursor.mouse_click)
+
+    # fig.subplots_adjust(left = 0.25, bottom = -0.5)
+    t_placement = np.linspace(0, len(t), len(t))
+    plt.imshow(a_map, cmap=plt.get_cmap('rainbow'), extent = [0, len(t), w[0], w[-1]], aspect = 'auto')
+    t_ticks_labels = []
+    t_ticks = np.linspace(0, len(t), 10)
+    print(t_ticks)
+    for i in t_ticks:
+        i = int(i)
+        if i == len(t):
+            t_ticks_labels.append(int(t[i-1]))
+        else:
+            t_ticks_labels.append(int(t[i]))
+    plt.xticks(ticks = t_ticks, labels = t_ticks_labels)
+    plt.xlabel('Pump Delay (fs)')
+    plt.ylabel('Wavelength (nm)')
+    plt.title('ΔA (mOD)')
+    plt.colorbar()
     
-#def sort_lists(list1, list2):
-#    # zip the two lists into one dictionary (x = keys, y = values)
-#    # sort the dictionary and then convert back to lists
-#    # keys are the results vector (Amplitude, Postiion, FWHM)
-#    # values are the time vector
-#    x = dict(zip(list1, list2))
-#    sorted_dict = {k: v for k, v in sorted(x.items(), key=lambda item: item[1])}
-#    keys = list(sorted_dict.keys())
-#    values = list(sorted_dict.values())
-#    return keys, values
-
-
-def data_avg(x, y, error = False):
-    '''
-    x vector is the list of time stamps
-    y vector is either the data in the t-space or ω-space
-    '''
-    x = np.array(x)
-    y = np.array(y)
-    x_new = []
-    y_new = []
-#    x_new = np.zeros(len(x))
-#    y_new = np.zeros(len(y))
-    get_indexes = lambda x, xs: [i for (y, i) in zip(xs, range(len(xs))) if abs(x-y) <= 10]
+    return
     
-    for i in x:
-        xlist = []
-        ylist = []
-        
-        idx = get_indexes(i, x)
-#        idx = duplicates(x, i)
-        for ix in idx:
-            xlist.append(x[ix])
-            ylist.append(y[ix])
-        
-        if error == True:
-            xmean = sum(xlist) / len(xlist)
-            yylist = []
-            for yy in ylist:
-                yy = 1 / (yy ** 2)
-                yylist.append(yy)
-            ymean = np.sqrt(sum(yylist))
-        else:
-            xmean = np.mean(xlist)
-            ymean = np.mean(ylist)
-        
-#        replace_idx = np.where(x == i)
-        x_new.append(xmean)
-        y_new.append(ymean)
-    
-    x_unique = []    
-    y_unique = []
-    for idx in np.unique(x_new, return_index = True)[1]:
-        x_unique = np.append(x_unique, x_new[idx])
-        y_unique = np.append(y_unique, y_new[idx])
-    return x_unique, y_unique
-#    x_new = list(OrderedDict.fromkeys(x_new))
-#    y_new = list(OrderedDict.fromkeys(y_new))
-#    return x_new, y_new
+"""
+User Input
+"""
+file = r"file.py"
+wstart = 500
+wstop = 700
+tstart = None
+tstop = None
+#surf(file, wstart, wstop, tstart, tstop)
+SVD(file, 3)
+"""
+Image Profile for Spyder
+"""
+data = np.array(pd.read_csv(file, header = None, delim_whitespace = False))
+time = data[1:, 0]
+wavelength = data[0, 1:]
+amplitude = data[1:, 1:]
 
-def all_data_avg(result):
-	avg_result = []
-	for column in range(len(result[0, :])):
-		if column == 0:
-			pass
-		elif column == 1:
-			avg = data_avg(result[:, 0], result[:, column])
-			avg_result = avg
-		else:
-			avg = data_avg(result[:, 0], result[:, column])
-			avg_result = np.row_stack((avg_result, avg[1]))
-	avg_result = avg_result.T
-	return avg_result
-        
-class Data_Lists:
-    # Note that you need to sort lists externally to this object via sort_lists
-    def __init__(self, dirname):
-        self.dirname = dirname
-        
-    def importdir(self):
-        directory = os.listdir(self.dirname)
-        
-        beforeT0 = []
-        beforeT0on = []
-        beforeT0off = []
-        beforeT0sub = []
-        
-        afterT0 = []
-        afterT0on = []
-        afterT0off = []
-        afterT0sub = []
-        
-        IPoff = []
-        IPon = []
-        IPsub = []
-        
-        for file in directory:
-            if '_-' in file:
-                beforeT0.append(file)
-            if '_-' not in file:
-                afterT0.append(file)
-        for file in beforeT0:
-            if 'IPoff' in file:
-                beforeT0off.append(file)
-            if 'IPon' in file:
-                beforeT0on.append(file)
-            if 'IPsubtracted' in file:
-                beforeT0sub.append(file)
-        for file in afterT0:
-            if 'IPoff' in file:
-                afterT0off.append(file)
-            if 'IPon' in file:
-                afterT0on.append(file)
-            if 'IPsubtracted' in file:
-                afterT0sub.append(file)
-                
-        '''
-        functions below to sort lists by time delay taken from here:
-        https://stackoverflow.com/questions/5967500/how-to-correctly-sort-a-string-with-a-number-inside
-        '''        
-        
-        def atof(text):
-            try:
-                retval = float(text)
-            except ValueError:
-                retval = text
-            return retval
-        
-        def natural_keys(text):
-            '''
-            alist.sort(key=natural_keys) sorts in human order
-            http://nedbatchelder.com/blog/200712/human_sorting.html
-            (See Toothy's implementation in the comments)
-            '''
-            return [ atof(c) for c in re.split(r'[+-]?([0-9]+(?:[.][0-9]*)?|[.][0-9]+)', text) ]
-        
-        beforeT0off.sort(key = natural_keys)
-        afterT0off.sort(key = natural_keys)
-        IPoff.extend(beforeT0off)
-        IPoff.reverse()
-        IPoff.extend(afterT0off)
-        
-        beforeT0on.sort(key = natural_keys)
-        afterT0on.sort(key = natural_keys)
-        IPon.extend(beforeT0on)
-        IPon.reverse()
-        IPon.extend(afterT0on)
-        
-        beforeT0sub.sort(key = natural_keys)
-        afterT0sub.sort(key = natural_keys)
-        IPsub.extend(beforeT0sub)
-        IPsub.reverse()
-        IPsub.extend(afterT0sub)
-        
-        off = []
-        tstamp_off = []
-        for file in IPoff:
-            file = self.dirname + '\\' + file
-            off.append(file)
-            
-            lhs1, rhs1 = file.split("scans_")
-            lhs2, rhs2 = rhs1.split("T")
-            file_tstamp = int(lhs2)
-            tstamp_off.append(file_tstamp)
-            
-        on = []
-        tstamp_on = []
-        for file in IPon:
-            file = self.dirname + '\\' + file
-            on.append(file)
-            
-            lhs1, rhs1 = file.split("scans_")
-            lhs2, rhs2 = rhs1.split("T")
-            file_tstamp = int(lhs2)
-            tstamp_on.append(file_tstamp)
-            
-        sub = []
-        tstamp_sub = []
-        for file in IPsub:
-            file = self.dirname + '\\' + file
-            sub.append(file)
-            
-            lhs1, rhs1 = file.split("scans_")
-            lhs2, rhs2 = rhs1.split("T")
-            file_tstamp = int(lhs2)
-            tstamp_sub.append(file_tstamp)
-        
-#        def sort_lists(x, y):
-#            '''
-#            Source:
-#            https://stackoverflow.com/questions/37111798/how-to-sort-a-list-of-x-y-coordinates
-#            '''
-#            print('HIIIIIIIIIIIIIIIIIIII')
-#            z = zip(np.array(x), np.array(y))
-#            z = sorted(z, key = lambda k: [k[1], k[0]])
-#            x2, y2 = zip(*z)
-#            x2 = list(x2)
-#            y2 = list(y2)
-#            return x2, y2
-        
-        offdict = dict(zip(off, tstamp_off))
-        ondict = dict(zip(on, tstamp_on))
-        subdict = dict(zip(sub, tstamp_sub))
-        
-        def sort_dict(x):
-            # sort the dictionary and then convert back to lists
-            # keys are the filenames
-            # values are the tstamps for each filename
-            sorted_dict = {k: v for k, v in sorted(x.items(), key = lambda item: item[1])}
-            keys = list(sorted_dict.keys())
-            values = list(sorted_dict.values())
-            return keys, values
-        
-        off, tstamp_off = sort_dict(offdict)
-        on, tstamp_on = sort_dict(ondict)
-        sub, tstamp_sub = sort_dict(subdict)
-        
-#        off, tstamp_off = sort_lists(off, tstamp_off)
-#        on, tstamp_on = sort_lists(on, tstamp_on)
-#        sub, tstamp_sub = sort_lists(sub, tstamp_sub)
-        
-        return off, on, sub, tstamp_off, tstamp_on, tstamp_sub
-        
+t = time
+w = wavelength
+a = amplitude
 
-    
-        
+if tstart == None:
+    tstart = t[0]
+else:
+    pass
 
-class FFT:
-    def __init__(self, file, cut = None, n = 1, submethod = 4, window = 0, zp = 2**12, graphs = False):
-        self.file = file
-        self.cut = cut
-        self.n = n
-        self.submethod = submethod
-        self.window = window
-        self.zp = zp
-        self.graphs = graphs
-        
-#        if type(self.file) == str:
-#            print('hi')
-#            lhs1, rhs1 = self.file.split("scans_")
-#            lhs2, rhs2 = rhs1.split("T")
-#            tstamp = int(lhs2)
-#            print(tstamp)
-#        else:
-#            print('bye')
-#        return tstamp
+if tstop == None:
+    tstop = t[-1]
+else:
+    pass
 
-    def FFT(self):
-        
-        # graph_output check
-        if self.graphs == True:
-            pass
-        elif self.graphs == False:
-            pass
-        else:
-            self.graphs == False
-            print('The variable for `graphs` must be either True or False. The graphs will not be shown by default.')
-        print(self.file)
-        data = pd.read_csv(self.file, header = None, delim_whitespace = True)
-        time = np.array(data[0])
-        amplitude = np.array(data[1])
-        
-        if self.graphs == True:
-            plt.figure(1)
-            plt.plot(time, amplitude, label = 'All Data')
-            plt.title('Raw Data')
-            plt.xlabel('Delay (fs)')
-            plt.ylabel('Amplitude')
-        else:
-            pass
-        
-        # This is for cutting out part of the data
-        def find_nearest(array, value):
-            array = np.asarray(array)
-            idx = (np.abs(array - value)).argmin()
-            return idx, array[idx]
-        
-        def cut(time, amplitude, n):
-            if n == None:
-                return time, amplitude
-            else:
-                idx = find_nearest(time, n)[0]
-                time = time[idx:]
-                amplitude = amplitude[idx:]
-                return time, amplitude
-        
-        time, amplitude = cut(time, amplitude, self.cut) 
+if wstart == None:
+    wstart = w[0]
+else:
+    pass
 
-        if amplitude[-1] % amplitude[-1] != 0:
-            # np.nan % np.nan = np.nan
-            # for any float x, x % x = 0
-            time = time[:-2]
-            amplitude = amplitude[:-2]
-        else:
-            pass
-        print('length of time', len(time))
-        if self.graphs == True:
-            # show cut-off
-            plt.figure(1)
-            plt.plot(time, amplitude, label = 'After Cutoff')
-            plt.title('Raw Data')
-            plt.xlabel('Delay (fs)')
-            plt.ylabel('Amplitude')
-        else:
-            pass
+if wstop == None:
+    wstop = w[-1]
+else:
+    pass
 
-        print('self n =', self.n)
-        N = int(self.n * len(time))
-        tvals = np.linspace(time[0], time[-1], N)
-        print('tvals length =', len(tvals))
-        freqmax = 1/(tvals[1] - tvals[0])
-        freqmin = 0
-        freq_lowest_observable = 1 / (tvals[-1] - tvals[0]) / (2.99792458E-5)
-        print('lowest freq = %.1f 1/cm' % freq_lowest_observable)
-        
-        # make points evenly spaced via interpolation
-        #f = np.array(np.interp(tvals, time, amplitude)) # linear interpolation
-        f = interp1d(time, amplitude, kind = 'cubic') # cubic interpolation
-        f = f(tvals)
-        print('hhh', len(tvals), len(f))
-        if self.graphs == True:
-            plt.figure(1)
-            plt.scatter(tvals, f, c = 'red', label = 'Interpolated Data')
-            plt.legend()
-        else:
-            pass
-        
-        print(amplitude[-1])
-        print(f[-1])
-        '''
-        "Asymmetric Least Squares Smoothing" by P. Eilers and H. Boelens in 2005
-        
-        There are two parameters: p for asymmetry and λ for smoothness. 
-        Both have to be tuned to the data at hand. 
-        We found that generally 0.001 ≤ p ≤ 0.1 is a good choice (for a signal with positive peaks) 
-        and 10^2 ≤ λ ≤ 10^9 , but exceptions may occur. 
-        In any case one should vary λ on a grid that is approximately linear for log λ.
-        '''
-        
-        def baseline_als(y, lam, p, niter=10):
-          L = len(y)
-          D = sparse.diags([1,-2,1],[0,-1,-2], shape=(L,L-2))
-          w = np.ones(L)
-          for i in range(niter):
-            W = sparse.spdiags(w, 0, L, L)
-            Z = W + lam * D.dot(D.transpose())
-            z = spsolve(Z, w*y)
-            w = p * (y > z) + (1-p) * (y < z)
-          return z
-        
-        # fit a polynomial to flatten FWM signal curve
-        
-        def poly(x, f, n):
-            p = np.polyfit(x, f, n)
-            fp = []
-            for i in np.arange(n+1):
-        #            print(n-i)
-        #            print(i)
-                
-                fp = x**(n-i) * p[i]
-            fp = np.sum(fp)
-        #        print(fp)
-            return fp
-        
-        def sub(f, method):
-            if method == 0:
-                fb = baseline_als(f, 10**7, 0.5)
-                fsub  = f - fb
-                if self.graphs == True:
-                    plt.figure(2)
-                    plt.plot(tvals, np.zeros(np.shape(f)), 'b--')
-                    plt.plot(tvals, f, 'g-')
-                    plt.plot(tvals, fb, 'r-')
-                    plt.plot(tvals, fsub, 'y-')
-                    plt.title('Baseline Subtraction')
-                    plt.xlabel('Delay (fs)')
-                    plt.ylabel('Amplitude')
-                else:
-                    pass
-            elif method == 1:
-                x0 = [f[0], f[0], abs(tvals[-1]-tvals[0])/2, abs(tvals[-1]-tvals[0])/2]
-#                bounds = ([0, 0, 0, 0], [np.inf, np.inf, np.inf, np.inf])
-                p = curve_fit(lambda t, A1, A2, t1, t2: A1*np.exp(-t/t1) + A2*np.exp(-t/t2), tvals, f, x0)[0] #, bounds = bounds)[0]
-                fb = p[0]*np.exp(-tvals / p[1]) + p[2]*np.exp(-tvals / p[3])
-                fsub = f - fb
-                if self.graphs == True:
-                    plt.figure(3)
-                    plt.plot(tvals, np.zeros(np.shape(f)), 'b--')
-                    plt.plot(tvals, f, 'g-')
-                    plt.plot(tvals, fb, 'r-')
-                    plt.plot(tvals, fsub, 'y-')
-                    plt.title('Baseline Subtraction')
-                    plt.xlabel('Delay (fs)')
-                    plt.ylabel('Amplitude')
-            elif method == 2:
-                x0 = [0, 0, (tvals[-1]-tvals[0])/2]
-                bounds = ([0, 0, 0], [np.inf, np.inf, np.inf])
-                p = curve_fit(lambda t, y0, A1, t1: y0 + A1 * np.exp(-t / t1), tvals, f, x0)[0]
-                print(p)
-                fb = []
-                for t in tvals:
-                    fb.append(p[0] + p[1] * np.exp(-t / p[2]))
-                fsub = f - fb
-                
-                if self.graphs == True:
-                    plt.figure(2)
-                    plt.plot(tvals, np.zeros(np.shape(f)), 'b--')
-                    plt.plot(tvals, f, 'g-')
-                    plt.plot(tvals, fb, 'r-')
-                    plt.plot(tvals, fsub, 'y-')
-                    plt.title('Baseline Subtraction')
-                    plt.xlabel('Delay (fs)')
-                    plt.ylabel('Amplitude')
-            elif method == 3:
-                x0 = [max(f), max(f), max(f), tvals[-1], tvals[-1]]
-                bounds = ([-10, -10, -10, 0, 0], [10, 10, 10, tvals[-1], tvals[-1]])
-                p = curve_fit(lambda t, y0, A1, A2, t1, t2: y0 + A1*np.exp(-t/t1) + A2*np.exp(-t/t2), tvals, f, x0, bounds = bounds)[0]                
-                fb = []
-                for t in tvals:
-                    fb.append(p[0] + p[1]*np.exp(-t / p[3]) + p[2]*np.exp(-t / p[4]))
-                fsub = f - fb
-                
-                if self.graphs == True:
-                    plt.figure(2)
-                    plt.plot(tvals, np.zeros(np.shape(f)), 'b--')
-                    plt.plot(tvals, f, 'g-')
-                    plt.plot(tvals, fb, 'r-')
-                    plt.plot(tvals, fsub, 'y-')
-                    plt.title('Baseline Subtraction')
-                    plt.xlabel('Delay (fs)')
-                    plt.ylabel('Amplitude')
-            elif method == 4:
-                x0 = [max(f), max(f), max(f), max(f), tvals[-1], tvals[-1], tvals[-1]]
-                bounds = ([-10, -10, -10, -10, 0, 0, 0], [10, 10, 10, 10, tvals[-1], tvals[-1], tvals[-1]])
-                p = curve_fit(lambda t, y0, A1, A2, A3, t1, t2, t3: y0 + A1*np.exp(-t/t1) + A2*np.exp(-t/t2) + A3*np.exp(-t/t3), tvals, f, x0, bounds = bounds)[0]                
-                fb = []
-                for t in tvals:
-                    fb.append(p[0] + p[1]*np.exp(-t / p[4]) + p[2]*np.exp(-t / p[5]) + p[3]*np.exp(-t / p[6]))
-                fsub = f - fb
-                
-                if self.graphs == True:
-                    plt.figure(2)
-                    plt.plot(tvals, np.zeros(np.shape(f)), 'b--')
-                    plt.plot(tvals, f, 'g-')
-                    plt.plot(tvals, fb, 'r-')
-                    plt.plot(tvals, fsub, 'y-')
-                    plt.title('Baseline Subtraction')
-                    plt.xlabel('Delay (fs)')
-                    plt.ylabel('Amplitude')
-            else:
-                p = np.polyfit(tvals, f, 4)
-#                fp = tvals*p[0] + p[1]
-                # fp = tvals**2*p[0] + tvals*p[1] + p[2]
-                # fp = tvals**3*p[0] + tvals**2*p[1] + tvals*p[2] + p[3]
-                fp = tvals**4*p[0] + tvals**3*p[1] + tvals**2*p[2] + tvals*p[3] + p[4]
-                # fp = tvals**6*p[0] + tvals**5*p[1] + tvals**4*p[2] + tvals**3*p[3] + tvals**2*p[4] + tvals*p[5] + p[6]
-                fsub = f - fp
-                if self.graphs == True:
-                    plt.figure(2)
-                    plt.plot(tvals, np.zeros(np.shape(f)), 'b--')
-                    plt.plot(tvals, f, 'g-')
-                    plt.plot(tvals, fp, 'r-')
-                    plt.plot(tvals, fsub, 'y-')
-                    plt.title('Baseline Subtraction')
-                    plt.xlabel('Delay (fs)')
-                    plt.ylabel('Amplitude')
-                else:
-                    pass
-                
-            return fsub
-        
-        # while True:
-        #     """
-        #     This while loop avoids running into this numpy bug:
-        #     raise LinAlgError("SVD did not converge") LinAlgError: SVD did not converge
-        #     """
-        #     try:
-        #         fsub = sub(f, 3)
-        #         f = fsub * 1
-        #         # windowing and zero-padding
-        #         # f = fsub * np.hamming(len(f))
-        #         f = fsub * np.kaiser(len(f), 3)
-        #         '''
-        #         The Kaiser can approximate many other windows by varying the beta parameter.
-        #         beta 	Window shape
-        #         0 	Rectangular
-        #         5 	Similar to a Hamming
-        #         6 	Similar to a Hanning
-        #         8.6 	Similar to a Blackman
-        #         '''
-                
-        #         # Shift data up/down to zero line
-        #         # if f[-1] > 0:
-        #         #     f = f - f[-1]
-        #         # elif f[-1] < 0:
-        #         #     f = f + f[-1]
-        #         # else:
-        #         #     pass
-        #         break
-        #     except:
-        #         continue
-            
-        fsub = sub(f, self.submethod)
+tstart, tstop, wstart, wstop = [tstart, tstop, wstart, wstop]
 
-        if self.window == None:
-        	f = fsub * 1
-        elif (self.window == 'Bartlett') or (self.window == 'bartlett'):
-            print('ba')
-            f = fsub * np.bartlett(len(f))
-        elif (self.window == 'Blackman') or (self.window == 'blackman'):
-            f = fsub * np.blackman(len(f))
-        elif (self.window == 'Hamming') or (self.window == 'hamming'):
-            f = fsub * np.hamming(len(f))
-        elif (self.window == 'Hanning') or (self.window == 'hanning'):
-            print('h')
-            f = fsub * np.hanning(len(f))
-        elif (self.window == 0) or (self.window == 'Rectangle') or (self.window == 'rectangle') or (self.window == 'Rectangular') or (self.window == 'rectangular'):
-            f = fsub * np.kaiser(len(f), 0)
-            print('Numpy does not have a rectangular window function, so Kaiser 0 is applied instead, which is similar.')
-        elif (type(self.window) is int) or (type(self.window) is float):
-            f = fsub * np.kaiser(len(f), self.window)
-            print('If the window value is zero or less, an empty array is returned. See the documentation: https://numpy.org/doc/stable/reference/generated/numpy.kaiser.html#numpy.kaiser')
-        else:
-            print('The user\'s chosen window is not recognized. No windowing function will be applied.')
-            f = fsub * 1
+tstart_idx = find_nearest(t, tstart)[0]
+tstop_idx = find_nearest(t, tstop)[0]
+wstart_idx = find_nearest(w, wstart)[0]
+wstop_idx = find_nearest(w, wstop)[0]
 
-        tinc = tvals[1] - tvals[0]
-        # zero-padding
-        if self.zp == None:
-            pass
-        else:
-            zp = np.zeros(self.zp)
-            f = np.concatenate((f, zp))
-            zp_time = np.linspace(tvals[-1]+tinc, tvals[-1]+len(zp)*tinc, len(zp))
-            tvals = np.concatenate((tvals, zp_time))
+t = t[tstart_idx:tstop_idx+1]
+w = w[wstart_idx:wstop_idx+1]
+a = a[tstart_idx:tstop_idx+1, wstart_idx:wstop_idx+1]
+a_map = 1000 * a.T[::-1] # convert to mOD and flip/rotate map to match axes
 
-        if self.graphs == True:
-            plt.figure(3)
-            plt.plot(tvals, f)
-            plt.title('Windowing and Zero-Padding')
-            plt.xlabel('Delay (fs)')
-            plt.ylabel('Amplitude')
-        else:
-            pass
-        
-        # FFT magnitude and wavenumber axis
-        # ft = np.abs(np.fft.fft(f))
-        # ft_real = np.real(np.fft.fft(f))
-        # ft_imag = np.im(np.fft.fft(f))
-        ft = np.abs(np.fft.fft(f))
-        k = np.linspace(freqmin, freqmax, len(ft)) / (2.99792458E-5) #/ 33.35
-        # k = np.fft.fftfreq(len(ft), tvals[1]-tvals[0])  / (2.99792458E-5)
-        
-        if self.graphs == True:
-            plt.figure(4)
-            plt.plot(k, ft, 'b*-')
-#            for i in klist:
-#                plt.plot([i, i],[min(ft), 1.2*max(ft)], label = i)
-            plt.xlim((0, 2000))
-            plt.title('FFT')
-            plt.xlabel('Wavenumber (1/cm)')
-            plt.ylabel('Amplitude')
-            
-#            plt.legend()
-        else:
-            pass
-        
-        start_idx = find_nearest(k, 0)[0]
-        end_idx = find_nearest(k, 2000)[0]
-        k = k[start_idx:end_idx]
-        ft = ft[start_idx:end_idx]
-        plt.show()
-        return np.vstack((k, ft))
 
-class FFT_Fit:
-    def __init__(self, k, ft, number_of_peaks, x0, bounds, graphs, tstamp = None):
-        self.k = k
-        self.ft = ft
-        self.number_of_peaks = number_of_peaks
-        self.x0 = x0
-        self.bounds = bounds
-        self.graphs = graphs
-        self.tstamp = tstamp
+sns.set()
+sns.set_context('paper')
+fig, ax= plt.subplots()
+cursor = Cursor(file, ax, t, w, a)
+fig.canvas.mpl_connect('motion_notify_event', cursor.mouse_move)
+fig.canvas.mpl_connect('button_press_event', cursor.mouse_click)
 
-    def fit(self):
-        def Gaussian(k, A, k0, FWHM):
-            return A * np.exp(-4*np.log(2) * ((k - k0)/FWHM)**2)
-        def Gaussian2(k, A1, A2, k01, k02, FWHM1, FWHM2):
-            return Gaussian(k, A1, k01, FWHM1) + Gaussian(k, A2, k02, FWHM2)
-        def Gaussian3(k, A1, A2, A3, k01, k02, k03, FWHM1, FWHM2, FWHM3):
-            return Gaussian(k, A1, k01, FWHM1) + Gaussian(k, A2, k02, FWHM2) + Gaussian(k, A3, k03, FWHM3)
-        def Gaussian4(k, A1, A2, A3, A4, k01, k02, k03, k04, FWHM1, FWHM2, FWHM3, FWHM4):
-            return Gaussian(k, A1, k01, FWHM1) + Gaussian(k, A2, k02, FWHM2) + Gaussian(k, A3, k03, FWHM3) + Gaussian(k, A4, k04, FWHM4)
-        def Gaussian5(k, A1, A2, A3, A4, A5, k01, k02, k03, k04, k05, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5):
-            return Gaussian(k, A1, k01, FWHM1) + Gaussian(k, A2, k02, FWHM2) + Gaussian(k, A3, k03, FWHM3) + Gaussian(k, A4, k04, FWHM4) + Gaussian(k, A5, k05, FWHM5)
-        def Gaussian6(k, A1, A2, A3, A4, A5, A6, k01, k02, k03, k04, k05, k06, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6):
-            return Gaussian(k, A1, k01, FWHM1) + Gaussian(k, A2, k02, FWHM2) + Gaussian(k, A3, k03, FWHM3) + Gaussian(k, A4, k04, FWHM4) + Gaussian(k, A5, k05, FWHM5) + Gaussian(k, A6, k06, FWHM6)
-        def Gaussian7(k, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7):
-            return Gaussian(k, A1, k01, FWHM1) + Gaussian(k, A2, k02, FWHM2) + Gaussian(k, A3, k03, FWHM3) + Gaussian(k, A4, k04, FWHM4) + Gaussian(k, A5, k05, FWHM5) + Gaussian(k, A6, k06, FWHM6) + Gaussian(k, A7, k07, FWHM7)
-      
-        
-        k = self.k
-        ft = self.ft
-        x0 = self.x0
-        bounds = self.bounds
-        graphs = self.graphs
-        tstamp = self.tstamp
-        
-        # graph_output check
-        if graphs == True:
-            pass
-        elif graphs == False:
-            pass
-        else:
-            graphs == False
-            print('The variable for `graphs` must be either True or False. The graphs will not be shown by default.')
-        
-        # kdiff = int(k[1] - k[0])
-        # k_neg = np.linspace(-100, 0, kdiff)
-        # kfit = np.append(k_neg, k)
-        if self.number_of_peaks == 1:
-            # while True:
-            #     try:
-            #         popt, pcov = curve_fit(lambda k, y0, A, k0, FWHM: y0 + Gaussian(k, A, k0, FWHM), k, ft, x0, bounds = bounds)
-            #         break
-            #     except:
-            #         continue
-#            print(pcov)
-            popt, pcov = curve_fit(lambda k, y0, A, k0, FWHM: y0 + Gaussian(k, A, k0, FWHM), k, ft, x0, bounds = bounds)
-            perr = np.sqrt(np.diag(pcov))
-            # print('Errors = ', perr)
-            sigma_squared = sum((ft - popt[0] - Gaussian(k, *popt[1:])) ** 2)
-            if tstamp != None:
-                print(tstamp, 'fs ', 'sigma^2 = ', sigma_squared)
-            else:
-                print('sigma^2 = ', sigma_squared)
-            if graphs == True:
-                plt.figure()
-                plt.plot(k, ft, label = tstamp)
-                plt.plot(k, popt[0] + Gaussian(k, *popt[1:]), 'r-')
-                plt.title('y0 = %.2f, A = %.2f, k0 = %.2f, FWHM = %.2f' % tuple(popt))
-                if tstamp != None:
-                    plt.legend()
-                plt.show()
-        elif self.number_of_peaks == 2:
-            popt, pcov = curve_fit(lambda k, y0, A1, A2, k01, k02, FWHM1, FWHM2: y0 + Gaussian2(k, A1, A2, k01, k02, FWHM1, FWHM2), k, ft, x0, bounds = bounds)
-            # while True:
-            #     try:
-            #         popt, pcov = curve_fit(lambda k, y0, A1, A2, k01, k02, FWHM1, FWHM2: y0 + Gaussian2(k, A1, A2, k01, k02, FWHM1, FWHM2), k, ft, x0, bounds = bounds)
-            #         break
-            #     except:
-            #         continue
-#            print(pcov)
-            y0, A1, A2, k01, k02, FWHM1, FWHM2 = popt
-            perr = np.sqrt(np.diag(pcov))
-            # print('Errors = ', perr)
-            sigma_squared = sum((ft - y0 - Gaussian2(k, A1, A2, k01, k02, FWHM1, FWHM2)) ** 2)
-            if tstamp != None:
-                print(tstamp, 'fs ', 'sigma^2 = ', sigma_squared)
-            else:
-                print('sigma^2 = ', sigma_squared)
-            if graphs == True:
-                y0, A1, A2, k01, k02, FWHM1, FWHM2 = popt
-                plt.figure()
-                plt.plot(k, ft, label = tstamp)
-                plt.plot(k, y0 + Gaussian(k, A1, k01, FWHM1), 'r-')
-                plt.plot(k, y0 + Gaussian(k, A2, k02, FWHM2), 'g-')
-                plt.plot(k, y0 + Gaussian2(k, A1, A2, k01, k02, FWHM1, FWHM2), 'k--')
-                plt.title('y0 = %.2f, A1 = %.2f, A2 = %.2f, k01 = %.2f, k02 = %.2f, FWHM1 = %.2f, FWHM2 = %.2f' % tuple(popt))
-                if tstamp != None:
-                    plt.legend()
-                plt.show()
-        elif self.number_of_peaks == 3:
-            # while True:
-            #     try:
-            #         popt, pcov = curve_fit(lambda k, y0, A1, A2, A3, k01, k02, k03, FWHM1, FWHM2, FWHM3: y0 + Gaussian3(k, A1, A2, A3, k01, k02, k03, FWHM1, FWHM2, FWHM3), k, ft, x0, bounds = bounds)
-            #         break
-            #     except:
-            #         continue
-            popt, pcov = curve_fit(lambda k, y0, A1, A2, A3, k01, k02, k03, FWHM1, FWHM2, FWHM3: y0 + Gaussian3(k, A1, A2, A3, k01, k02, k03, FWHM1, FWHM2, FWHM3), k, ft, x0, bounds = bounds)
-            y0, A1, A2, A3, k01, k02, k03, FWHM1, FWHM2, FWHM3 = popt
-            sigma_squared = sum((ft - y0 - Gaussian3(k, A1, A2, A3, k01, k02, k03, FWHM1, FWHM2, FWHM3)) ** 2)
-            if tstamp != None:
-                print(tstamp, 'fs ', 'sigma^2 = ', sigma_squared)
-            else:
-                print('sigma^2 = ', sigma_squared)
-
-            # print(pcov)
-            perr = np.sqrt(np.diag(pcov))
-            # print('Errors = ', perr)
-            if graphs == True:
-                y0, A1, A2, A3, k01, k02, k03, FWHM1, FWHM2, FWHM3 = popt
-                plt.figure()
-                plt.plot(k, ft, label = tstamp)
-                plt.plot(k, y0 + Gaussian(k, A1, k01, FWHM1), 'r-')
-                plt.plot(k, y0 + Gaussian(k, A2, k02, FWHM2), 'g-')
-                plt.plot(k, y0 + Gaussian(k, A3, k03, FWHM3), 'y-')
-                plt.plot(k, y0 + Gaussian3(k, A1, A2, A3, k01, k02, k03, FWHM1, FWHM2, FWHM3), 'k--')
-                plt.title('y0 = %.2f, A1 = %.2f, A2 = %.2f, A3 = %.2f, k01 = %.2f, k02 = %.2f, k03 = %.2f, FWHM1 = %.2f, FWHM2 = %.2f, FWHM3 = %.2f' % tuple(popt))
-                if tstamp != None:
-                    plt.legend()
-                plt.show()
-        elif self.number_of_peaks == 4:
-            popt, pcov = curve_fit(lambda k, y0, A1, A2, A3, A4, k01, k02, k03, k04, FWHM1, FWHM2, FWHM3, FWHM4: y0 + Gaussian4(k, A1, A2, A3, A4, k01, k02, k03, k04, FWHM1, FWHM2, FWHM3, FWHM4), k, ft, x0, bounds = bounds)
-            # while True:
-            #     try:
-            #         popt, pcov = curve_fit(lambda k, y0, A1, A2, A3, A4, k01, k02, k03, k04, FWHM1, FWHM2, FWHM3, FWHM4: y0 + Gaussian4(k, A1, A2, A3, A4, k01, k02, k03, k04, FWHM1, FWHM2, FWHM3, FWHM4), k, ft, x0, bounds = bounds)
-            #         break
-            #     except:
-            #         continue
-#            print(pcov)
-            perr = np.sqrt(np.diag(pcov))
-            # print('Errors = ', perr)
-            y0, A1, A2, A3, A4, k01, k02, k03, k04, FWHM1, FWHM2, FWHM3, FWHM4 = popt
-            sigma_squared = sum((ft - y0 - Gaussian4(k, A1, A2, A3, A4, k01, k02, k03, k04, FWHM1, FWHM2, FWHM3, FWHM4)) ** 2)
-            if tstamp != None:
-                print(tstamp, 'fs ', 'sigma^2 = ', sigma_squared)
-            else:
-                print('sigma^2 = ', sigma_squared)
-            if graphs == True:
-                y0, A1, A2, A3, A4, k01, k02, k03, k04, FWHM1, FWHM2, FWHM3, FWHM4 = popt
-                plt.figure()
-                plt.plot(k, ft, label = tstamp)
-                plt.plot(k, y0 + Gaussian(k, A1, k01, FWHM1), 'r-')
-                plt.plot(k, y0 + Gaussian(k, A2, k02, FWHM2), 'g-')
-                plt.plot(k, y0 + Gaussian(k, A3, k03, FWHM3), 'y-')
-                plt.plot(k, y0 + Gaussian(k, A4, k04, FWHM4), 'c-')
-                plt.plot(k, y0 + Gaussian4(k, A1, A2, A3, A4, k01, k02, k03, k04, FWHM1, FWHM2, FWHM3, FWHM4), 'k--')
-                plt.title('y0 = %.2f, A1 = %.2f, A2 = %.2f, A3 = %.2f, A4 = %.2f, k01 = %.2f, k02 = %.2f, k03 = %.2f, k04 = %.2f, FWHM1 = %.2f, FWHM2 = %.2f, FWHM3 = %.2f, FWHM4 = %.2f' % tuple(popt))
-                if tstamp != None:
-                    plt.legend()
-                plt.show()
-        elif self.number_of_peaks == 5:
-            popt, pcov = curve_fit(lambda k, y0, A1, A2, A3, A4, A5, k01, k02, k03, k04, k05, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5: y0 + Gaussian5(k, A1, A2, A3, A4, A5, k01, k02, k03, k04, k05, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5), k, ft, x0, bounds = bounds)
-            # while True:
-            #     try:
-            #         popt, pcov = curve_fit(lambda k, y0, A1, A2, A3, A4, A5, k01, k02, k03, k04, k05, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5: y0 + Gaussian5(k, A1, A2, A3, A4, A5, k01, k02, k03, k04, k05, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5), k, ft, x0, bounds = bounds)
-            #         break
-            #     except:
-            #         continue
-#            print(pcov)
-            perr = np.sqrt(np.diag(pcov))
-            y0, A1, A2, A3, A4, A5, k01, k02, k03, k04, k05, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5 = popt
-            # print('Errors = ', perr)
-            sigma_squared = sum((ft - y0 - Gaussian5(k, A1, A2, A3, A4, A5, k01, k02, k03, k04, k05, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5)) ** 2)
-            if tstamp != None:
-                print(tstamp, 'fs ', 'sigma^2 = ', sigma_squared)
-            else:
-                print('sigma^2 = ', sigma_squared)
-            if graphs == True:
-                y0, A1, A2, A3, A4, A5, k01, k02, k03, k04, k05, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5 = popt
-                plt.figure()
-                plt.plot(k, ft, label = tstamp)
-                plt.plot(k, y0 + Gaussian(k, A1, k01, FWHM1), 'r-')
-                plt.plot(k, y0 + Gaussian(k, A2, k02, FWHM2), 'g-')
-                plt.plot(k, y0 + Gaussian(k, A3, k03, FWHM3), 'y-')
-                plt.plot(k, y0 + Gaussian(k, A4, k04, FWHM4), 'c-')
-                plt.plot(k, y0 + Gaussian(k, A5, k05, FWHM5), 'm')
-                plt.plot(k, y0 + Gaussian5(k, A1, A2, A3, A4, A5, k01, k02, k03, k04, k05, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5), 'k--')
-                plt.title('y0 = %.2f, A1 = %.2f, A2 = %.2f, A3 = %.2f, A4 = %.2f, A5 = %.2f, k01 = %.2f, k02 = %.2f, k03 = %.2f, k04 = %.2f, k05 = %.2f, FWHM1 = %.2f, FWHM2 = %.2f, FWHM3 = %.2f, FWHM4 = %.2f, FWHM5 = %.2f' % tuple(popt))
-                if tstamp != None:
-                    plt.legend()
-                plt.show()
-        elif self.number_of_peaks == 6:
-            popt, pcov = curve_fit(lambda k, y0, A1, A2, A3, A4, A5, A6, k01, k02, k03, k04, k05, k06, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6: y0 + Gaussian6(k, A1, A2, A3, A4, A5, A6, k01, k02, k03, k04, k05, k06, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6), k, ft, x0, bounds = bounds)
-            # while True:
-            #     try:
-            #         popt, pcov = curve_fit(lambda k, y0, A1, A2, A3, A4, A5, A6, k01, k02, k03, k04, k05, k06, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6: y0 + Gaussian6(k, A1, A2, A3, A4, A5, A6, k01, k02, k03, k04, k05, k06, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6), k, ft, x0, bounds = bounds)
-            #         break
-            #     except:
-            #         continue
-#            print(pcov)
-            perr = np.sqrt(np.diag(pcov))
-            # print('Errors = ', perr)
-            y0, A1, A2, A3, A4, A5, A6, k01, k02, k03, k04, k05, k06, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6 = popt
-            sigma_squared = sum((ft - y0 - Gaussian6(k, A1, A2, A3, A4, A5, A6, k01, k02, k03, k04, k05, k06, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6)) ** 2)
-            if tstamp != None:
-                print(tstamp, 'fs ', 'sigma^2 = ', sigma_squared)
-            else:
-                print('sigma^2 = ', sigma_squared)
-            if graphs == True:
-                y0, A1, A2, A3, A4, A5, A6, k01, k02, k03, k04, k05, k06, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6 = popt
-                plt.figure()
-                plt.plot(k, ft, label = tstamp)
-                plt.plot(k, y0 + Gaussian(k, A1, k01, FWHM1), 'r-')
-                plt.plot(k, y0 + Gaussian(k, A2, k02, FWHM2), 'g-')
-                plt.plot(k, y0 + Gaussian(k, A3, k03, FWHM3), 'y-')
-                plt.plot(k, y0 + Gaussian(k, A4, k04, FWHM4), 'c-')
-                plt.plot(k, y0 + Gaussian(k, A5, k05, FWHM5), 'm-')
-                plt.plot(k, y0 + Gaussian(k, A6, k06, FWHM6), color = '#800080') # purple
-                plt.plot(k, y0 + Gaussian6(k, A1, A2, A3, A4, A5, A6, k01, k02, k03, k04, k05, k06, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6), 'k--')
-                plt.title('y0 = %.2f, A1 = %.2f, A2 = %.2f, A3 = %.2f, A4 = %.2f, A5 = %.2f, A6 = %.2f, k01 = %.2f, k02 = %.2f, k03 = %.2f, k04 = %.2f, k05 = %.2f, k06 = %.2f, FWHM1 = %.2f, FWHM2 = %.2f, FWHM3 = %.2f, FWHM4 = %.2f, FWHM5 = %.2f, FWHM6 = %.2f' % tuple(popt))
-                if tstamp != None:
-                    plt.legend()
-                plt.show()
-        elif self.number_of_peaks == 7:
-            popt, pcov = curve_fit(lambda k, y0, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7: y0 + Gaussian7(k, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7), k, ft, x0, bounds = bounds)
-            # while True:
-            #     try:
-            #         popt, pcov = curve_fit(lambda k, y0, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7: y0 + Gaussian7(k, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7), k, ft, x0, bounds = bounds)
-            #         break
-            #     except:
-            #         continue
-#            print(pcov)
-            perr = np.sqrt(np.diag(pcov))
-            # print('Errors = ', perr)
-            y0, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7 = popt
-            sigma_squared = sum((ft - y0 - Gaussian7(k, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7) ** 2))
-            if tstamp != None:
-                print(tstamp, 'fs ', 'sigma^2 = ', sigma_squared)
-            else:
-                print('sigma^2 = ', sigma_squared)
-            if graphs == True:
-                y0, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7 = popt
-                plt.figure()
-                plt.plot(k, ft, label = tstamp)
-                plt.plot(k, y0 + Gaussian(k, A1, k01, FWHM1), 'r-')
-                plt.plot(k, y0 + Gaussian(k, A2, k02, FWHM2), 'g-')
-                plt.plot(k, y0 + Gaussian(k, A3, k03, FWHM3), 'y-')
-                plt.plot(k, y0 + Gaussian(k, A4, k04, FWHM4), 'c-')
-                plt.plot(k, y0 + Gaussian(k, A5, k05, FWHM5), 'm-')
-                plt.plot(k, y0 + Gaussian(k, A6, k06, FWHM6), color = '#800080') # purple
-                plt.plot(k, y0 + Gaussian(k, A7, k07, FWHM7), color = '#ffa500') # orange
-                plt.plot(k, y0 + Gaussian7(k, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7), 'k--')
-                plt.title('y0 = %.2f, A1 = %.2f, A2 = %.2f, A3 = %.2f, A4 = %.2f, A5 = %.2f, A6 = %.2f, A7 = %.2f, k01 = %.2f, k02 = %.2f, k03 = %.2f, k04 = %.2f, k05 = %.2f, k06 = %.2f, k07 = %.2f, FWHM1 = %.2f, FWHM2 = %.2f, FWHM3 = %.2f, FWHM4 = %.2f, FWHM5 = %.2f, FWHM6 = %.2f, FWHM7 = %.2f' % tuple(popt))
-                if tstamp != None:
-                    plt.legend()
-                plt.show()
-        else:
-            print('More than 7 peaks not currently supported, so this will default to a 7-Gaussian fit.')
-            popt, pcov = curve_fit(lambda k, y0, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7: y0 + Gaussian7(k, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7), k, ft, x0, bounds = bounds)
-            # while True:
-            #     try:
-            #         popt, pcov = curve_fit(lambda k, y0, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7: y0 + Gaussian7(k, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7), k, ft, x0, bounds = bounds)
-            #         break
-            #     except:
-            #         continue
-#            print(pcov)
-            perr = np.sqrt(np.diag(pcov))
-            # print('Errors = ', perr)
-            y0, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7 = popt
-            sigma_squared = sum((ft - y0 - Gaussian7(k, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7) ** 2))
-            if tstamp != None:
-                print(tstamp, 'fs ', 'sigma^2 = ', sigma_squared)
-            else:
-                print('sigma^2 = ', sigma_squared)
-            if graphs == True:
-                y0, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7 = popt
-                plt.figure()
-                plt.plot(k, ft, label = tstamp)
-                plt.plot(k, y0 + Gaussian(k, A1, k01, FWHM1), 'r-')
-                plt.plot(k, y0 + Gaussian(k, A2, k02, FWHM2), 'g-')
-                plt.plot(k, y0 + Gaussian(k, A3, k03, FWHM3), 'y-')
-                plt.plot(k, y0 + Gaussian(k, A4, k04, FWHM4), 'c-')
-                plt.plot(k, y0 + Gaussian(k, A5, k05, FWHM5), 'm-')
-                plt.plot(k, y0 + Gaussian(k, A6, k06, FWHM6), color = '#800080') # purple
-                plt.plot(k, y0 + Gaussian(k, A7, k07, FWHM7), color = '#ffa500') # orange
-                plt.plot(k, y0 + Gaussian7(k, A1, A2, A3, A4, A5, A6, A7, k01, k02, k03, k04, k05, k06, k07, FWHM1, FWHM2, FWHM3, FWHM4, FWHM5, FWHM6, FWHM7), 'k--')
-                plt.title('y0 = %.2f, A1 = %.2f, A2 = %.2f, A3 = %.2f, A4 = %.2f, A5 = %.2f, A6 = %.2f, A7 = %.2f, k01 = %.2f, k02 = %.2f, k03 = %.2f, k04 = %.2f, k05 = %.2f, k06 = %.2f, k07 = %.2f, FWHM1 = %.2f, FWHM2 = %.2f, FWHM3 = %.2f, FWHM4 = %.2f, FWHM5 = %.2f, FWHM6 = %.2f, FWHM7 = %.2f' % tuple(popt))
-                if tstamp != None:
-                    plt.legend()
-                plt.show()
-        return popt, perr
-
-class pDFWM(Data_Lists, FFT, FFT_Fit):
-    def __init__(self, directory, number_of_peaks, x0, bounds,  group = 'sub', cut = None, n = 1, submethod = 4, window = 0, zp = 2**12, y0guess = 0, y0uplim = 1, graphs = False, norm = False):
-        self.directory = directory
-        self.number_of_peaks = number_of_peaks
-
-        # x0 and bounds do not need to consider y0, since it will be handled internally
-        self.x0 = x0
-        self.bounds = bounds    
-
-        self.group = group
-        self.cut = cut
-        self.n = n
-        self.submethod = submethod
-        self.window = window
-        self.zp = zp
-        self.y0guess = y0guess
-        self.y0uplim = y0uplim
-        self.graphs = graphs
-        self.norm = norm 
-        
-        '''
-        0 = False for FFT() and FFT_Fit()
-        1 = True for FFT(), False for FFT_Fit()
-        2 = True for FFT() and FFT_Fit()
-        
-        False = False for FFT() and FFT_Fit()
-        True = True for FFT() and FFT_Fit()
-        '''
-        self.graphs = graphs
-        
-    def transients(self):
-
-        off, on, sub, tstamp_off, tstamp_on, tstamp_sub = Data_Lists(self.directory).importdir()
-
-        if (self.group == 'sub') or (self.group == 'Sub') or (self.group == 'subtracted') or (self.group == 'Subtracted'):
-            self.group = sub
-            tstamp = tstamp_sub
-        elif (self.group == 'on') or (self.group == 'On'):
-            self.group = on
-            tstamp = tstamp_on
-        
-        elif (self.group == 'off') or (self.group == 'Off'):
-            self.group = off
-            tstamp = tstamp_off
-        else:
-            print('Error in choosing lists --> subtracted list is chosen by default')
-            self.group = sub
-            tstamp = tstamp_sub
-        
-        # this round is just for getting a consistent y0 for all FFT fits
-        y0guess = self.y0guess
-        y0min = 0
-        y0max = self.y0uplim
-        y0list = []
-        
-        self.x0.insert(0, y0guess)
-        self.bounds[0].insert(0, y0min)
-        self.bounds[1].insert(0, y0max)
-    
-        if self.graphs == False or self.graphs == 0:
-            FFT_graphs = False
-            FFT_Fit_graphs = False
-        elif self.graphs == 1:
-            FFT_graphs = True
-            FFT_Fit_graphs = False
-        elif self.graphs == 2:
-            FFT_graphs = False
-            FFT_Fit_graphs = True
-        elif self.graphs == True or self.graphs == 3:
-            FFT_graphs = True
-            FFT_Fit_graphs = True
-        else:
-            FFT_graphs = False
-            FFT_Fit_graphs = False
-            print('graphs must be set equal to False, True, 0, 1, 2, or 3. The default of False will now be used.')
-
-        for i in range(len(self.group)):
-            print('file =', self.group[i])
-            print('number of subtracted files =', len(self.group))
-            print('iteration in the list =', i)
-            #self, file, cut = None, n = 1, window = 0, zp = 2**12, graphs = False
-            k, ft = FFT(self.group[i], self.cut, self.n, self.submethod, self.window, self.zp, FFT_graphs).FFT()
-            if self.norm == True:
-                ft = ft / np.max(ft)
-            else:
-                pass
-            params, perr = FFT_Fit(k, ft, self.number_of_peaks, self.x0, self.bounds, FFT_Fit_graphs, tstamp[i]).fit()
-            y0list.append(params[0])
-        y0avg = np.mean(y0list)
-        # this is the round that is finalized
-        paramslist = []
-        perrlist = []
-        for i in range(len(self.group)):
-            # use i to pick a specific file and a specific tstamp that corresponds for that file 
-            k, ft = FFT(self.group[i], self.cut, self.n, self.submethod, self.window, self.zp, FFT_graphs).FFT()
-            
-            self.x0[0] = y0avg
-            self.bounds[0][0] = y0avg-1e-5
-            self.bounds[1][0] = y0avg+1e-5
-
-            params, perr = FFT_Fit(k, ft, self.number_of_peaks, self.x0, self.bounds, FFT_Fit_graphs, tstamp[i]).fit()
-                
-            if i == 0:
-                paramslist.append(params)
-                perrlist.append(perr)
-            else:
-                paramslist = np.row_stack((paramslist, params))
-                perrlist = np.row_stack((perrlist, perr))
-                
-        '''
-        zip the parameters and errors together, below is an example for fitting two peaks:
-            y0, y0err, A1, A1err, A2, A2err, k01, k01err, k02, k02err, FWHM1, FWHM1err, FWHM2, FWHM2err
-        '''
-        
-        result = []
-        for i in range(len(paramslist[0, :])):
-            result.append(paramslist[:, i])
-            result.append(perrlist[:, i])
-        
-        resultarray = np.array(tstamp).T
-        for i in range(len(result)):
-            resultarray = np.column_stack((resultarray, np.array(result[i]).T))
-
-        return resultarray
-    
-        
+# fig.subplots_adjust(left = 0.25, bottom = -0.5)
+t_placement = np.linspace(0, len(t), len(t))
+plt.imshow(a_map, cmap=plt.get_cmap('rainbow'), extent = [0, len(t), w[0], w[-1]], aspect = 'auto')
+t_ticks_labels = []
+t_ticks = np.linspace(0, len(t), 10)
+print(t_ticks)
+for i in t_ticks:
+    i = int(i)
+    if i == len(t):
+        t_ticks_labels.append(int(t[i-1]))
+    else:
+        t_ticks_labels.append(int(t[i]))
+plt.xticks(ticks = t_ticks, labels = t_ticks_labels)
+plt.xlabel('Pump Delay (fs)')
+plt.ylabel('Wavelength (nm)')
+plt.title('ΔA (mOD)')
+plt.colorbar()
+plt.show()
