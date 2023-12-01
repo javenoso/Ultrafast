@@ -525,5 +525,5 @@ def Image_Profile_TZ(time, wavelength, amplitude, tstart = None, tstop = None, w
 
     return
 
-file = r"C:\Users\joeav\Desktop\13 scan average.csv"
+file = r"file.csv"
 Image_Profile(file)
