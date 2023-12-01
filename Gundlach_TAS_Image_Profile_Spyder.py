@@ -534,7 +534,7 @@ def Image_Profile_TZ(time, wavelength, amplitude, tstart = None, tstop = None, w
 """
 User Input
 """
-file = r"file.py"
+file = r"file.csv"
 wstart = 500
 wstop = 700
 tstart = None
